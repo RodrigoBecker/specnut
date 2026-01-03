@@ -31,7 +31,15 @@
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-[Gates determined based on constitution file]
+Verify compliance with SpecNut Constitution v1.0.0 principles:
+
+- [ ] **I. Tool-First Development**: All features accessible via CLI with clear I/O contracts
+- [ ] **II. Test-First Discipline**: TDD plan in place (tests written → approved → fail → implement)
+- [ ] **III. Observability**: Logging, debug mode, and error handling planned
+- [ ] **IV. Semantic Versioning**: Version bump justified (MAJOR/MINOR/PATCH)
+- [ ] **V. Simplicity & YAGNI**: Complexity justified if violating simplicity
+- [ ] **VI. Documentation**: Help text, README, docstrings, CHANGELOG planned
+- [ ] **VII. Output Format Flexibility**: Format handling (input/output) addressed
 
 ## Project Structure
 
