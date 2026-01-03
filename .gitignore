@@ -79,3 +79,4 @@ poetry.lock
 
 specs/*
 .claude/*
+.specify/*
