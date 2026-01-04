@@ -126,7 +126,7 @@ def version(
 @app.command()
 def digest(
     input_file: str = typer.Argument(
-        ..., help="Path to specification file (YAML, JSON, or Markdown)"
+        ..., help="Path to specification file or directory (YAML, JSON, or Markdown)"
     ),
     output_file: Optional[str] = typer.Argument(None, help="Path for digest output (optional)"),
     format: str = typer.Option(
@@ -158,6 +158,21 @@ def digest(
         "--force",
         help="Overwrite existing digest file without prompting",
     ),
+    include: Optional[list[str]] = typer.Option(
+        None,
+        "--include",
+        help="Include additional file patterns (repeatable). Example: --include '*.txt'",
+    ),
+    no_recursive: bool = typer.Option(
+        False,
+        "--no-recursive",
+        help="Process only top-level directory (disable recursive scanning)",
+    ),
+    fail_fast: bool = typer.Option(
+        False,
+        "--fail-fast",
+        help="Stop processing on first error (default: continue on error)",
+    ),
 ):
     """Generate optimized specification digest.
 
@@ -182,14 +197,21 @@ def digest(
 
     from rich.progress import Progress, SpinnerColumn, TextColumn
 
-    from specnut.cli.styles import print_error, print_info, print_success, print_warning
+    from specnut.cli.styles import (
+        console,
+        display_batch_summary,
+        print_error,
+        print_info,
+        print_success,
+        print_warning,
+    )
     from specnut.core.optimizer import generate_digest
     from specnut.models import CompressionLevel, FormatEnum
     from specnut.models.optimization import DEFAULT_PROFILE, OptimizationProfile
     from specnut.models.specification import Specification
 
     try:
-        # Validate input file
+        # Validate input path exists
         input_path = Path(input_file)
         if not input_path.exists():
             print_error(
@@ -199,11 +221,108 @@ def digest(
             )
             sys.exit(ExitCode.GENERAL_ERROR)
 
+        # Check if input is a directory (batch mode) or file (single mode)
+        if input_path.is_dir():
+            # DIRECTORY BATCH PROCESSING MODE
+            from specnut.core.optimizer import (
+                DEFAULT_FILE_PATTERNS,
+                discover_files,
+                process_batch,
+            )
+
+            if dry_run:
+                console.print("[bold yellow]DRY RUN - No files will be written[/bold yellow]\n")
+
+            # Build patterns list
+            patterns = None
+            if include:
+                patterns = DEFAULT_FILE_PATTERNS.copy()
+                patterns.extend(include)
+
+            try:
+                # Discover files
+                scan_result = discover_files(
+                    input_path, patterns=patterns, recursive=not no_recursive
+                )
+            except ValueError as e:
+                print_error("No Files Found", str(e))
+                console.print("\nHint: Use --include \"*.ext\" to process custom file extensions")
+                sys.exit(ExitCode.GENERAL_ERROR)
+
+            # Validate format
+            try:
+                if format == "auto":
+                    output_format = None  # Use same as input
+                else:
+                    output_format = FormatEnum(format.lower())
+            except ValueError:
+                print_error(
+                    "Unsupported Format",
+                    f"Format '{format}' is not supported",
+                    "Use one of: auto, yaml, json, markdown, compact",
+                )
+                sys.exit(ExitCode.VALIDATION_ERROR)
+
+            # Validate compression level
+            try:
+                compression_level = CompressionLevel(compression.lower())
+            except ValueError:
+                print_error(
+                    "Invalid Compression",
+                    f"Compression level '{compression}' is not valid",
+                    "Use one of: low, medium, high",
+                )
+                sys.exit(ExitCode.VALIDATION_ERROR)
+
+            # Create optimization profile based on compression level
+            if compression_level == CompressionLevel.LOW:
+                profile = OptimizationProfile(
+                    name="low",
+                    compression_level=compression_level,
+                    target_reduction=0.32,
+                    section_priorities=DEFAULT_PROFILE.section_priorities,
+                    preserve_rules=DEFAULT_PROFILE.preserve_rules,
+                    abbreviation_map=None,  # No abbreviations for low compression
+                )
+            elif compression_level == CompressionLevel.HIGH:
+                profile = OptimizationProfile(
+                    name="high",
+                    compression_level=compression_level,
+                    target_reduction=0.60,
+                    section_priorities=DEFAULT_PROFILE.section_priorities,
+                    preserve_rules=DEFAULT_PROFILE.preserve_rules,
+                    abbreviation_map=DEFAULT_PROFILE.abbreviation_map,
+                )
+            else:
+                profile = DEFAULT_PROFILE
+
+            # Process batch
+            summary = process_batch(
+                files=scan_result.files_found,
+                profile=profile,
+                format_option=output_format,
+                dry_run=dry_run,
+                force=force,
+                fail_fast=fail_fast,
+            )
+
+            # Display summary
+            display_batch_summary(summary, dry_run=dry_run)
+
+            # Exit with appropriate code
+            # Success if ANY files were processed successfully
+            # Only fail if ALL files failed (or fail-fast mode)
+            if summary.successful_count == 0:
+                sys.exit(ExitCode.GENERAL_ERROR)  # All files failed
+            else:
+                sys.exit(ExitCode.SUCCESS)  # At least some files succeeded
+
+        # SINGLE FILE PROCESSING MODE (existing code)
         if not input_path.is_file():
             print_error(
                 "Invalid Input",
-                f"{input_file} is not a file",
-                "Provide a path to a file, not a directory",
+                f"{input_file} is neither a file nor a directory",
+                "Provide a path to a specification file or directory",
             )
             sys.exit(ExitCode.GENERAL_ERROR)
 

@@ -1,7 +1,9 @@
 """Digest generation and compression logic."""
 
 import re
+import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from specnut import __version__
@@ -9,7 +11,14 @@ from specnut.core.parser import parse_content, serialize_content
 from specnut.core.tokenizer import calculate_compression_ratio, count_tokens
 from specnut.models import FormatEnum, Priority
 from specnut.models.digest import Digest, DigestMetadata
-from specnut.models.metrics import SectionMetrics, TokenMetrics
+from specnut.models.metrics import (
+    DirectoryScanResult,
+    FileProcessingResult,
+    ProcessingSummary,
+    ProcessingStatus,
+    SectionMetrics,
+    TokenMetrics,
+)
 from specnut.models.optimization import OptimizationProfile
 from specnut.models.specification import Specification
 
@@ -420,3 +429,172 @@ def optimize_structured(
             optimized[key] = value
 
     return optimized
+
+
+# ============================================================================
+# Batch Processing Functions (Feature: 002-directory-digest)
+# ============================================================================
+
+# Default file patterns for directory scanning
+DEFAULT_FILE_PATTERNS = ["*.md", "*.yaml", "*.yml", "*.json"]
+
+
+def discover_files(
+    directory: Path,
+    patterns: list[str] | None = None,
+    recursive: bool = True,
+) -> DirectoryScanResult:
+    """Discover specification files in directory using glob patterns.
+
+    Args:
+        directory: Directory to scan
+        patterns: File patterns to match (default: DEFAULT_FILE_PATTERNS)
+        recursive: Whether to scan subdirectories (default: True)
+
+    Returns:
+        DirectoryScanResult with discovered files
+
+    Raises:
+        ValueError: If no files found matching patterns
+    """
+    patterns = patterns or DEFAULT_FILE_PATTERNS.copy()
+
+    files = []
+    for pattern in patterns:
+        if recursive:
+            files.extend(directory.rglob(pattern))
+        else:
+            files.extend(directory.glob(pattern))
+
+    # Remove duplicates and sort for deterministic ordering
+    files = sorted(set(files))
+
+    result = DirectoryScanResult(
+        input_path=directory,
+        files_found=files,
+        total_count=len(files),
+        patterns_used=patterns,
+        recursive=recursive,
+    )
+
+    # Validate that files were found
+    result.validate()
+
+    return result
+
+
+def process_batch(
+    files: list[Path],
+    profile: OptimizationProfile,
+    format_option: FormatEnum | None = None,
+    dry_run: bool = False,
+    force: bool = False,
+    fail_fast: bool = False,
+) -> ProcessingSummary:
+    """Process multiple files in batch mode with progress tracking.
+
+    Args:
+        files: List of files to process
+        profile: Optimization profile to apply
+        format_option: Output format override (or None to preserve)
+        dry_run: Preview mode - don't write files
+        force: Overwrite without prompting
+        fail_fast: Stop on first error
+
+    Returns:
+        ProcessingSummary with aggregate results
+    """
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        SpinnerColumn,
+        TaskProgressColumn,
+        TextColumn,
+    )
+
+    from specnut.cli.styles import console
+
+    results = []
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Processing files...", total=len(files))
+
+        for idx, file_path in enumerate(files, 1):
+            progress.update(
+                task,
+                description=f"Processing {idx}/{len(files)}: {file_path.name}",
+            )
+
+            try:
+                start_time = time.time()
+
+                # Load specification using factory method
+                spec = Specification.from_file(file_path)
+
+                # Generate digest
+                digest_obj, _ = generate_digest(spec, profile, format_option)
+
+                # Generate output path based on format
+                if format_option:
+                    ext = f".{format_option.value}"
+                else:
+                    ext = file_path.suffix
+
+                output_path = file_path.parent / f"{file_path.stem}.digest{ext}"
+
+                # Write digest (unless dry-run)
+                if not dry_run:
+                    # Check if file exists
+                    if output_path.exists() and not force:
+                        # Skip if exists and not forcing
+                        result = FileProcessingResult(
+                            file_path=file_path,
+                            status=ProcessingStatus.SKIPPED,
+                            original_tokens=spec.token_count,
+                            digest_tokens=digest_obj.token_count,
+                            processing_time_ms=int((time.time() - start_time) * 1000),
+                            output_path=output_path,
+                            error_message="File exists (use --force to overwrite)",
+                        )
+                        results.append(result)
+                        progress.advance(task)
+                        continue
+
+                    # Write digest file using to_file method
+                    digest_obj.to_file(output_path)
+
+                # Record success
+                processing_time = int((time.time() - start_time) * 1000)
+                result = FileProcessingResult.create_success(
+                    file_path=file_path,
+                    original_tokens=spec.token_count,
+                    digest_tokens=digest_obj.token_count,
+                    output_path=output_path,
+                    processing_time_ms=processing_time,
+                )
+                results.append(result)
+
+            except Exception as e:
+                # Record failure
+                result = FileProcessingResult.create_failure(file_path=file_path, error=e)
+                results.append(result)
+
+                # Handle fail-fast mode
+                if fail_fast:
+                    from specnut.cli.styles import print_error
+
+                    print_error(
+                        "Processing Failed", f"{file_path}: {type(e).__name__}: {str(e)}"
+                    )
+                    # Return partial summary
+                    return ProcessingSummary.from_results(results)
+
+            progress.advance(task)
+
+    return ProcessingSummary.from_results(results)

@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "specnut"
-version = "0.1.0"
+version = "0.1.1"
 description = "CLI tool for optimizing specification digests to reduce token consumption"
 authors = ["SpecNut Team <team@specnut.dev>"]
 readme = "README.md"
