@@ -57,7 +57,6 @@ class OptimizationProfile:
             raise ValueError(
                 f"Target reduction must be between 0.0 and 0.9, got {self.target_reduction}"
             )
-
         if not self.section_priorities:
             raise ValueError("Section priorities cannot be empty")
 

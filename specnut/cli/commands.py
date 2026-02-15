@@ -310,12 +310,17 @@ def digest(
             display_batch_summary(summary, dry_run=dry_run)
 
             # Exit with appropriate code
-            # Success if ANY files were processed successfully
-            # Only fail if ALL files failed (or fail-fast mode)
-            if summary.successful_count == 0:
+            # Success if ANY files were processed or skipped successfully
+            # Only fail if ALL files failed (not skipped)
+            all_failed = (
+                summary.successful_count == 0
+                and summary.failed_count > 0
+                and summary.skipped_count == 0
+            )
+            if all_failed:
                 sys.exit(ExitCode.GENERAL_ERROR)  # All files failed
             else:
-                sys.exit(ExitCode.SUCCESS)  # At least some files succeeded
+                sys.exit(ExitCode.SUCCESS)
 
         # SINGLE FILE PROCESSING MODE (existing code)
         if not input_path.is_file():

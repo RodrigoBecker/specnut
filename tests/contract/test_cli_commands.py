@@ -40,7 +40,7 @@ class TestGlobalOptions:
 
         assert result.returncode == 0
         # Should show version number
-        assert "0.1.0" in result.stdout or "version" in result.stdout.lower()
+        assert "specnut" in result.stdout.lower() or "version" in result.stdout.lower()
 
 
 class TestVersionCommand:

@@ -4,9 +4,6 @@ Tests for --include and --no-recursive flags (User Story 2).
 """
 
 import subprocess
-from pathlib import Path
-
-import pytest
 
 # Sample test data - expanded to ensure good compression
 SAMPLE_SPEC = """# Test Specification: Advanced Feature Processing System
@@ -204,3 +201,67 @@ class TestNoRecursiveFlag:
         assert (tmp_path / "level0.digest.md").exists()
         assert (level1 / "level1.digest.md").exists()
         assert (level2 / "level2.digest.md").exists()
+
+
+# ============================================================================
+# Phase 6: User Story 4 - Consistent Options Tests
+# ============================================================================
+
+
+class TestCompressionOptionBatch:
+    """T077: Contract tests for --compression in batch mode."""
+
+    def test_compression_option_applies_to_all(self, tmp_path):
+        """T077: Verify --compression high applies to all files in batch."""
+        (tmp_path / "file1.md").write_text(SAMPLE_SPEC)
+        (tmp_path / "file2.md").write_text(SAMPLE_SPEC)
+
+        result = run_digest([str(tmp_path), "--compression", "high"])
+
+        assert result.returncode == 0
+        assert (tmp_path / "file1.digest.md").exists()
+        assert (tmp_path / "file2.digest.md").exists()
+
+
+class TestFormatOptionBatch:
+    """T078: Contract tests for --format in batch mode."""
+
+    def test_format_option_applies_to_all(self, tmp_path):
+        """T078: Verify --format applies uniformly to all batch files."""
+        (tmp_path / "file1.md").write_text(SAMPLE_SPEC)
+        (tmp_path / "file2.md").write_text(SAMPLE_SPEC)
+
+        # Process with explicit format (auto = preserve input format)
+        result = run_digest([str(tmp_path), "--format", "auto"])
+
+        assert result.returncode == 0
+        assert (tmp_path / "file1.digest.md").exists()
+        assert (tmp_path / "file2.digest.md").exists()
+
+
+class TestDryRunBatch:
+    """T080-T081: Contract tests for --dry-run in batch mode."""
+
+    def test_dry_run_shows_preview(self, tmp_path):
+        """T080: Verify --dry-run lists files without creating them."""
+        (tmp_path / "file1.md").write_text(SAMPLE_SPEC)
+        (tmp_path / "file2.md").write_text(SAMPLE_SPEC)
+
+        result = run_digest([str(tmp_path), "--dry-run"])
+
+        assert result.returncode == 0
+        output = result.stdout + result.stderr
+        # Should indicate dry run mode
+        assert "DRY RUN" in output or "dry run" in output.lower()
+
+    def test_dry_run_no_files_written(self, tmp_path):
+        """T081: Verify --dry-run does not create any files."""
+        (tmp_path / "file1.md").write_text(SAMPLE_SPEC)
+        (tmp_path / "file2.md").write_text(SAMPLE_SPEC)
+
+        result = run_digest([str(tmp_path), "--dry-run"])
+
+        assert result.returncode == 0
+        # No digest files should exist
+        assert not (tmp_path / "file1.digest.md").exists()
+        assert not (tmp_path / "file2.digest.md").exists()
