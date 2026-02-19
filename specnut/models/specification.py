@@ -108,10 +108,7 @@ class Specification:
             file_path: Path to the file
 
         Returns:
-            Detected format
-
-        Raises:
-            ValueError: If format is unsupported
+            Detected format (defaults to MARKDOWN for unknown extensions)
         """
         suffix = file_path.suffix.lower()
 
@@ -123,11 +120,9 @@ class Specification:
             ".markdown": FormatEnum.MARKDOWN,
         }
 
-        if suffix not in format_map:
-            supported = ", ".join(format_map.keys())
-            raise ValueError(f"Unsupported format '{suffix}'. Supported formats: {supported}")
-
-        return format_map[suffix]
+        # Default to markdown for unknown text file extensions
+        # This allows --include to work with custom extensions (.txt, .spec, etc.)
+        return format_map.get(suffix, FormatEnum.MARKDOWN)
 
     def validate(self) -> None:
         """Validate file exists, is readable, and format is supported.

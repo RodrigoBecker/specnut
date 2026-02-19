@@ -20,12 +20,13 @@ class DigestMetadata:
 
     Attributes:
         source_hash: Hash of original specification
-        format_version: Digest format version (e.g., "1.0")
+        format_version: Digest format version (e.g., "1.1")
         optimization_profile: Profile used (default/low/medium/high)
         sections_compressed: List of section names that were compressed
         sections_preserved: List of section names preserved intact
         generator_version: SpecNut version that created digest
         timestamp: Generation timestamp
+        huffman_codebook: Huffman encoding map for abbreviation decompression
     """
 
     source_hash: str
@@ -35,6 +36,7 @@ class DigestMetadata:
     sections_preserved: list[str]
     generator_version: str
     timestamp: datetime
+    huffman_codebook: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -67,9 +69,9 @@ class Digest:
         if self.token_count <= 0:
             raise ValueError(f"Token count must be positive, got {self.token_count}")
 
-        if self.token_count >= self.source_spec.token_count:
+        if self.token_count > self.source_spec.token_count:
             raise ValueError(
-                f"Digest token count ({self.token_count}) must be less than "
+                f"Digest token count ({self.token_count}) must not exceed "
                 f"source token count ({self.source_spec.token_count})"
             )
 
@@ -106,6 +108,8 @@ class Digest:
                 "compression_ratio": self.compression_ratio,
                 "source_file": str(self.source_spec.file_path) if self.source_spec else None,
             }
+            if self.metadata.huffman_codebook:
+                metadata_dict["huffman_codebook"] = self.metadata.huffman_codebook
 
             # Write with format-specific metadata embedding
             if self.format == FormatEnum.MARKDOWN:
@@ -205,6 +209,7 @@ class Digest:
             sections_preserved=metadata_dict.get("sections_preserved", []),
             generator_version=metadata_dict["generator_version"],
             timestamp=datetime.fromisoformat(metadata_dict["timestamp"]),
+            huffman_codebook=metadata_dict.get("huffman_codebook"),
         )
 
         # Create a minimal source spec (we don't have the full original)

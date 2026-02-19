@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "specnut"
-version = "0.1.0"
-description = "CLI tool for optimizing specification digests to reduce token consumption"
+version = "0.2.0"
+description = "CLI tool for optimizing specification digests to reduce token consumption with Huffman-based compression"
 authors = ["SpecNut Team <team@specnut.dev>"]
 readme = "README.md"
 homepage = "https://github.com/specnut/specnut"

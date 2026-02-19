@@ -1,15 +1,25 @@
 """Digest generation and compression logic."""
 
 import re
+import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from specnut import __version__
+from specnut.core.huffman import HuffmanCodebook, build_codebook, huffman_compress
 from specnut.core.parser import parse_content, serialize_content
 from specnut.core.tokenizer import calculate_compression_ratio, count_tokens
 from specnut.models import FormatEnum, Priority
 from specnut.models.digest import Digest, DigestMetadata
-from specnut.models.metrics import SectionMetrics, TokenMetrics
+from specnut.models.metrics import (
+    DirectoryScanResult,
+    FileProcessingResult,
+    ProcessingSummary,
+    ProcessingStatus,
+    SectionMetrics,
+    TokenMetrics,
+)
 from specnut.models.optimization import OptimizationProfile
 from specnut.models.specification import Specification
 
@@ -240,6 +250,10 @@ def generate_digest(
 ) -> tuple[Digest, TokenMetrics]:
     """Generate optimized digest from specification.
 
+    Uses a two-pass optimization strategy:
+    1. Section-level compression (priority-based regex rules)
+    2. Huffman-based abbreviation (frequency analysis across full content)
+
     Args:
         specification: Specification to optimize
         profile: Optimization profile to use
@@ -261,7 +275,7 @@ def generate_digest(
     sections_preserved: list[str] = []
     sections_breakdown: dict[str, SectionMetrics] = {}
 
-    # Optimize based on format
+    # Pass 1: Section-level compression (priority-based)
     if specification.format == FormatEnum.MARKDOWN:
         optimized_data = optimize_markdown(parsed_data, profile, sections_breakdown)
     elif specification.format in (FormatEnum.YAML, FormatEnum.JSON):
@@ -276,11 +290,57 @@ def generate_digest(
     # Serialize optimized data
     optimized_content = serialize_content(optimized_data, output_format)
 
+    # Pass 2: Huffman-based abbreviation compression
+    # Build codebook from the original content for best frequency analysis
+    # Use lower min_freq for smaller texts to maximize compression
+    token_count = specification.token_count
+    min_freq = 2 if token_count < 1000 else 3
+    max_entries = 60 if token_count < 1000 else 40
+
+    huffman_codebook = build_codebook(
+        specification.content,
+        min_freq=min_freq,
+        max_entries=max_entries,
+    )
+    if huffman_codebook.encodings:
+        candidate = huffman_compress(optimized_content, huffman_codebook)
+        candidate_tokens = count_tokens(candidate)
+        pre_huffman_tokens = count_tokens(optimized_content)
+        # Only use Huffman result if it actually reduces tokens
+        if candidate_tokens < pre_huffman_tokens:
+            optimized_content = candidate
+        else:
+            # Huffman didn't help; clear codebook so metadata stays clean
+            huffman_codebook = build_codebook("", min_freq=999)
+
     # Count tokens
     optimized_tokens = count_tokens(optimized_content)
 
+    # Safety: if optimization increased tokens (possible with format conversion),
+    # re-serialize from optimized_data in target format, or fall back to original
+    if optimized_tokens >= specification.token_count:
+        # Try re-serializing optimized data in original format
+        fallback_content = serialize_content(optimized_data, specification.format)
+        fallback_tokens = count_tokens(fallback_content)
+        if fallback_tokens < specification.token_count:
+            optimized_content = fallback_content
+            optimized_tokens = fallback_tokens
+        else:
+            # Last resort: use original content with minimal cleanup
+            optimized_content = specification.content
+            optimized_tokens = specification.token_count
+            cleaned = re.sub(r"\n\n\n+", "\n\n", optimized_content)
+            cleaned = re.sub(r"  +", " ", cleaned)
+            cleaned_tokens = count_tokens(cleaned)
+            if cleaned_tokens < optimized_tokens:
+                optimized_content = cleaned
+                optimized_tokens = cleaned_tokens
+
     # Calculate compression ratio
-    compression_ratio = calculate_compression_ratio(specification.token_count, optimized_tokens)
+    if optimized_tokens >= specification.token_count:
+        compression_ratio = 0.0
+    else:
+        compression_ratio = calculate_compression_ratio(specification.token_count, optimized_tokens)
 
     # Build section lists
     for section_name, metrics in sections_breakdown.items():
@@ -289,15 +349,16 @@ def generate_digest(
         else:
             sections_compressed.append(section_name)
 
-    # Create metadata
+    # Create metadata with Huffman codebook
     metadata = DigestMetadata(
         source_hash=specification.hash,
-        format_version="1.0",
+        format_version="1.1",
         optimization_profile=profile.name,
         sections_compressed=sections_compressed,
         sections_preserved=sections_preserved,
         generator_version=__version__,
         timestamp=datetime.now(),
+        huffman_codebook=huffman_codebook.to_dict() if huffman_codebook.encodings else None,
     )
 
     # Create digest
@@ -359,7 +420,10 @@ def optimize_markdown(
 
         # Track metrics
         if original_tokens > 0:
-            reduction = calculate_compression_ratio(original_tokens, optimized_tokens)
+            if optimized_tokens >= original_tokens:
+                reduction = 0.0
+            else:
+                reduction = calculate_compression_ratio(original_tokens, optimized_tokens)
             sections_breakdown[section_name] = SectionMetrics(
                 section_name=section_name,
                 original_tokens=original_tokens,
@@ -401,7 +465,10 @@ def optimize_structured(
                 optimized[key] = optimized_value
 
             if original_tokens > 0:
-                reduction = calculate_compression_ratio(original_tokens, optimized_tokens)
+                if optimized_tokens >= original_tokens:
+                    reduction = 0.0
+                else:
+                    reduction = calculate_compression_ratio(original_tokens, optimized_tokens)
                 sections_breakdown[key] = SectionMetrics(
                     section_name=key,
                     original_tokens=original_tokens,
@@ -420,3 +487,172 @@ def optimize_structured(
             optimized[key] = value
 
     return optimized
+
+
+# ============================================================================
+# Batch Processing Functions (Feature: 002-directory-digest)
+# ============================================================================
+
+# Default file patterns for directory scanning
+DEFAULT_FILE_PATTERNS = ["*.md", "*.yaml", "*.yml", "*.json"]
+
+
+def discover_files(
+    directory: Path,
+    patterns: list[str] | None = None,
+    recursive: bool = True,
+) -> DirectoryScanResult:
+    """Discover specification files in directory using glob patterns.
+
+    Args:
+        directory: Directory to scan
+        patterns: File patterns to match (default: DEFAULT_FILE_PATTERNS)
+        recursive: Whether to scan subdirectories (default: True)
+
+    Returns:
+        DirectoryScanResult with discovered files
+
+    Raises:
+        ValueError: If no files found matching patterns
+    """
+    patterns = patterns or DEFAULT_FILE_PATTERNS.copy()
+
+    files = []
+    for pattern in patterns:
+        if recursive:
+            files.extend(directory.rglob(pattern))
+        else:
+            files.extend(directory.glob(pattern))
+
+    # Remove duplicates, exclude digest output files, and sort for deterministic ordering
+    files = sorted(f for f in set(files) if ".digest." not in f.name)
+
+    result = DirectoryScanResult(
+        input_path=directory,
+        files_found=files,
+        total_count=len(files),
+        patterns_used=patterns,
+        recursive=recursive,
+    )
+
+    # Validate that files were found
+    result.validate()
+
+    return result
+
+
+def process_batch(
+    files: list[Path],
+    profile: OptimizationProfile,
+    format_option: FormatEnum | None = None,
+    dry_run: bool = False,
+    force: bool = False,
+    fail_fast: bool = False,
+) -> ProcessingSummary:
+    """Process multiple files in batch mode with progress tracking.
+
+    Args:
+        files: List of files to process
+        profile: Optimization profile to apply
+        format_option: Output format override (or None to preserve)
+        dry_run: Preview mode - don't write files
+        force: Overwrite without prompting
+        fail_fast: Stop on first error
+
+    Returns:
+        ProcessingSummary with aggregate results
+    """
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        SpinnerColumn,
+        TaskProgressColumn,
+        TextColumn,
+    )
+
+    from specnut.cli.styles import console
+
+    results = []
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Processing files...", total=len(files))
+
+        for idx, file_path in enumerate(files, 1):
+            progress.update(
+                task,
+                description=f"Processing {idx}/{len(files)}: {file_path.name}",
+            )
+
+            try:
+                start_time = time.time()
+
+                # Load specification using factory method
+                spec = Specification.from_file(file_path)
+
+                # Generate digest
+                digest_obj, _ = generate_digest(spec, profile, format_option)
+
+                # Generate output path based on format
+                if format_option:
+                    ext = f".{format_option.value}"
+                else:
+                    ext = file_path.suffix
+
+                output_path = file_path.parent / f"{file_path.stem}.digest{ext}"
+
+                # Write digest (unless dry-run)
+                if not dry_run:
+                    # Check if file exists
+                    if output_path.exists() and not force:
+                        # Skip if exists and not forcing
+                        result = FileProcessingResult(
+                            file_path=file_path,
+                            status=ProcessingStatus.SKIPPED,
+                            original_tokens=spec.token_count,
+                            digest_tokens=digest_obj.token_count,
+                            processing_time_ms=int((time.time() - start_time) * 1000),
+                            output_path=output_path,
+                            error_message="File exists (use --force to overwrite)",
+                        )
+                        results.append(result)
+                        progress.advance(task)
+                        continue
+
+                    # Write digest file using to_file method
+                    digest_obj.to_file(output_path)
+
+                # Record success
+                processing_time = int((time.time() - start_time) * 1000)
+                result = FileProcessingResult.create_success(
+                    file_path=file_path,
+                    original_tokens=spec.token_count,
+                    digest_tokens=digest_obj.token_count,
+                    output_path=output_path,
+                    processing_time_ms=processing_time,
+                )
+                results.append(result)
+
+            except Exception as e:
+                # Record failure
+                result = FileProcessingResult.create_failure(file_path=file_path, error=e)
+                results.append(result)
+
+                # Handle fail-fast mode
+                if fail_fast:
+                    from specnut.cli.styles import print_error
+
+                    print_error(
+                        "Processing Failed", f"{file_path}: {type(e).__name__}: {str(e)}"
+                    )
+                    # Return partial summary
+                    return ProcessingSummary.from_results(results)
+
+            progress.advance(task)
+
+    return ProcessingSummary.from_results(results)
