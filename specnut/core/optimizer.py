@@ -420,7 +420,10 @@ def optimize_markdown(
 
         # Track metrics
         if original_tokens > 0:
-            reduction = calculate_compression_ratio(original_tokens, optimized_tokens)
+            if optimized_tokens >= original_tokens:
+                reduction = 0.0
+            else:
+                reduction = calculate_compression_ratio(original_tokens, optimized_tokens)
             sections_breakdown[section_name] = SectionMetrics(
                 section_name=section_name,
                 original_tokens=original_tokens,
@@ -462,7 +465,10 @@ def optimize_structured(
                 optimized[key] = optimized_value
 
             if original_tokens > 0:
-                reduction = calculate_compression_ratio(original_tokens, optimized_tokens)
+                if optimized_tokens >= original_tokens:
+                    reduction = 0.0
+                else:
+                    reduction = calculate_compression_ratio(original_tokens, optimized_tokens)
                 sections_breakdown[key] = SectionMetrics(
                     section_name=key,
                     original_tokens=original_tokens,
